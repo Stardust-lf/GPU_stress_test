@@ -28,7 +28,18 @@ def get_gpu_frequency_and_power():
     return frequency.strip(), power.strip()
 
 
-def gpu_stress_test(matrix_size=1024, max_errors=20, test_duration=180, frequency_offsets=None, output_file="gpu_error_log.csv"):
+def calculate_hamming_distance(a, b):
+    """
+    Calculate the Hamming distance between two binary matrices.
+    """
+    # Convert to binary representation
+    a_bin = np.unpackbits(a.view(np.uint8))
+    b_bin = np.unpackbits(b.view(np.uint8))
+    # Calculate Hamming distance
+    return np.sum(a_bin != b_bin)
+
+
+def gpu_stress_test(matrix_size=1024, max_errors=20, test_duration=180, frequency_offsets=None, output_file="gpu_1024_350400.csv"):
     """
     GPU stress test that switches frequency offsets and measures error statistics.
     Logs errors to a CSV file.
@@ -40,7 +51,7 @@ def gpu_stress_test(matrix_size=1024, max_errors=20, test_duration=180, frequenc
     with open(output_file, mode="w", newline="") as csvfile:
         writer = csv.writer(csvfile)
         # Write the header
-        writer.writerow(["Frequency (MHz)", "Power (Watts)", "Error Time (s)", "Error Magnitude"])
+        writer.writerow(["Frequency (MHz)", "Power (Watts)", "Error Time (s)", "Error Magnitude", "Hamming Distance"])
 
         for freq in frequency_offsets:
             print(f"\nSetting GPU frequency offset to {freq}...")
@@ -111,12 +122,14 @@ def gpu_stress_test(matrix_size=1024, max_errors=20, test_duration=180, frequenc
                     error_time_elapsed = current_time - last_error_time
                     frequency, power = get_gpu_frequency_and_power()
                     error_magnitude = np.abs(c_result - c_expected).max()
-                    writer.writerow([frequency, power, error_time_elapsed, error_magnitude])
+                    hamming_distance = calculate_hamming_distance(c_result, c_expected)
+                    writer.writerow([frequency, power, error_time_elapsed, error_magnitude, hamming_distance])
                     error_count += 1
                     print(f"Error {error_count} detected at iteration {iteration}.")
                     print(f"Time since last error: {error_time_elapsed:.2f} seconds.")
                     print(f"Current GPU frequency: {frequency} MHz, Power Draw: {power} W.")
                     print(f"Error Magnitude: {error_magnitude:.6f}")
+                    print(f"Hamming Distance: {hamming_distance}")
                     last_error_time = current_time
                     
                     # Stop if maximum errors reached
@@ -139,4 +152,5 @@ def gpu_stress_test(matrix_size=1024, max_errors=20, test_duration=180, frequenc
 
 
 # Run the GPU stress test
-gpu_stress_test(matrix_size=1024, max_errors=60, test_duration=180, frequency_offsets=list(range(320, 279, -5)))
+gpu_stress_test(matrix_size=1024, max_errors=100, test_duration=180, frequency_offsets=list(range(400, 354, -5)))
+
