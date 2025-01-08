@@ -5,6 +5,7 @@ import numpy as np
 import time
 import subprocess
 import csv
+import argparse
 
 
 def set_gpu_frequency(offset):
@@ -15,74 +16,66 @@ def set_gpu_frequency(offset):
     subprocess.run(command, shell=True, check=True)
 
 
-def get_gpu_frequency_and_power():
+def get_gpu_metrics():
     """
-    Queries the current GPU frequency and power draw using `nvidia-smi`.
-    Returns the frequency (MHz) and power draw (Watts).
+    Queries the GPU frequency, power draw, and SM utilization using `nvidia-smi`.
+    Returns frequency (MHz), power draw (Watts), and SM utilization (%).
     """
-    command = "nvidia-smi --query-gpu=clocks.gr,power.draw --format=csv,noheader,nounits"
+    command = "nvidia-smi --query-gpu=clocks.gr,power.draw,utilization.gpu --format=csv,noheader,nounits"
     result = subprocess.run(command, shell=True, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError("Failed to query GPU stats with nvidia-smi.")
-    frequency, power = result.stdout.strip().split(',')
-    return frequency.strip(), power.strip()
+    frequency, power, sm_util = result.stdout.strip().split(',')
+    return frequency.strip(), power.strip(), sm_util.strip()
 
 
 def calculate_hamming_distance(a, b):
     """
     Calculate the Hamming distance between two binary matrices.
     """
-    # Convert to binary representation
     a_bin = np.unpackbits(a.view(np.uint8))
     b_bin = np.unpackbits(b.view(np.uint8))
-    # Calculate Hamming distance
     return np.sum(a_bin != b_bin)
 
 
-def gpu_stress_test(matrix_size=1024, max_errors=20, test_duration=180, frequency_offsets=None, output_file="gpu_1024_350400.csv"):
+def gpu_stress_test(matrix_size=256, max_errors=100, test_duration=180, freq_start=100, freq_end=0, freq_stride=5, output_file="gpu_stress_test.csv"):
     """
     GPU stress test that switches frequency offsets and measures error statistics.
-    Logs errors to a CSV file.
+    Logs errors, GPU metrics, and SM usage to a CSV file.
     """
-    if frequency_offsets is None:
-        frequency_offsets = list(range(320, 249, -5))  # Default: 320 to 250 decrementing by 5
-
-    # Prepare CSV file for logging
+    frequency_offsets = list(range(freq_start, freq_end - 1, -freq_stride))
+    
     with open(output_file, mode="w", newline="") as csvfile:
         writer = csv.writer(csvfile)
-        # Write the header
-        writer.writerow(["Frequency (MHz)", "Power (Watts)", "Error Time (s)", "Error Magnitude", "Hamming Distance"])
+        writer.writerow(["Frequency (MHz)", "Power (Watts)", "SM Usage (%)", "Error Time (s)", "Error Magnitude", "Hamming Distance"])
 
         for freq in frequency_offsets:
             print(f"\nSetting GPU frequency offset to {freq}...")
             set_gpu_frequency(freq)
-            time.sleep(5)  # Allow GPU to stabilize
+            time.sleep(5)
             
-            # Create two large random matrices
-            a = np.random.randn(matrix_size, matrix_size).astype(np.float32)
-            b = np.random.randn(matrix_size, matrix_size).astype(np.float32)
+            a = np.random.randint(0, 1000, (matrix_size, matrix_size)).astype(np.int32)
+            b = np.random.randint(0, 1000, (matrix_size, matrix_size)).astype(np.int32)
             
-            # Allocate GPU memory for both matrices and result
             a_gpu = cuda.mem_alloc(a.nbytes)
             b_gpu = cuda.mem_alloc(b.nbytes)
-            c_gpu = cuda.mem_alloc(a.nbytes)  # Result matrix
-            c_expected_gpu = cuda.mem_alloc(a.nbytes)  # GPU-computed expected matrix
+            c_gpu = cuda.mem_alloc(a.nbytes)
+            c_expected_gpu = cuda.mem_alloc(a.nbytes)
             
-            # Copy matrices to GPU
             cuda.memcpy_htod(a_gpu, a)
             cuda.memcpy_htod(b_gpu, b)
             
-            # Compile the CUDA kernel for matrix multiplication
             mod = SourceModule(
                 """
-                __global__ void matrix_multiply(float *a, float *b, float *c, int matrix_size)
-                {
+                #define PRIME 2147483647
+
+                __global__ void matrix_multiply(int *a, int *b, int *c, int matrix_size) {
                     int row = blockIdx.y * blockDim.y + threadIdx.y;
                     int col = blockIdx.x * blockDim.x + threadIdx.x;
                     if (row < matrix_size && col < matrix_size) {
-                        float value = 0;
+                        int value = 0;
                         for (int k = 0; k < matrix_size; ++k) {
-                            value += a[row * matrix_size + k] * b[k * matrix_size + col];
+                            value = (value + ((a[row * matrix_size + k] % PRIME) * (b[k * matrix_size + col] % PRIME)) % PRIME) % PRIME;
                         }
                         c[row * matrix_size + col] = value;
                     }
@@ -91,48 +84,42 @@ def gpu_stress_test(matrix_size=1024, max_errors=20, test_duration=180, frequenc
             )
             func = mod.get_function("matrix_multiply")
             
-            # Define block and grid sizes
-            block_size = 32  # Threads per block
+            block_size = 32
             grid_size = (matrix_size + block_size - 1) // block_size
             
-            # Compute the expected result once on GPU
             func(a_gpu, b_gpu, c_expected_gpu, np.int32(matrix_size), block=(block_size, block_size, 1), grid=(grid_size, grid_size, 1))
             cuda.Context.synchronize()
             
-            # Test statistics
             start_time = time.time()
             last_error_time = start_time
             iteration = 0
             error_count = 0
             
-            print(f"Running test for up to {test_duration} seconds or until {max_errors} errors at frequency offset {freq}...")
+            print(f"Running test for {test_duration} seconds or up to {max_errors} errors at frequency offset {freq}...")
             
             while time.time() - start_time < test_duration:
                 func(a_gpu, b_gpu, c_gpu, np.int32(matrix_size), block=(block_size, block_size, 1), grid=(grid_size, grid_size, 1))
                 cuda.Context.synchronize()
                 
-                # Verify correctness after each iteration
                 c_result = np.empty_like(a)
                 c_expected = np.empty_like(a)
                 cuda.memcpy_dtoh(c_result, c_gpu)
                 cuda.memcpy_dtoh(c_expected, c_expected_gpu)
                 
-                if not np.allclose(c_result, c_expected, atol=1e-5):
+                if not np.array_equal(c_result, c_expected):
                     current_time = time.time()
                     error_time_elapsed = current_time - last_error_time
-                    frequency, power = get_gpu_frequency_and_power()
+                    frequency, power, sm_util = get_gpu_metrics()
                     error_magnitude = np.abs(c_result - c_expected).max()
                     hamming_distance = calculate_hamming_distance(c_result, c_expected)
-                    writer.writerow([frequency, power, error_time_elapsed, error_magnitude, hamming_distance])
+                    writer.writerow([frequency, power, sm_util, error_time_elapsed, error_magnitude, hamming_distance])
                     error_count += 1
-                    print(f"Error {error_count} detected at iteration {iteration}.")
-                    print(f"Time since last error: {error_time_elapsed:.2f} seconds.")
-                    print(f"Current GPU frequency: {frequency} MHz, Power Draw: {power} W.")
-                    print(f"Error Magnitude: {error_magnitude:.6f}")
+                    print(f"Error {error_count} detected. Time since last error: {error_time_elapsed:.2f}s.")
+                    print(f"SM Usage: {sm_util}%, Frequency: {frequency} MHz, Power: {power} W.")
+                    print(f"Error Magnitude: {error_magnitude}")
                     print(f"Hamming Distance: {hamming_distance}")
                     last_error_time = current_time
                     
-                    # Stop if maximum errors reached
                     if error_count >= max_errors:
                         break
                 
@@ -140,17 +127,32 @@ def gpu_stress_test(matrix_size=1024, max_errors=20, test_duration=180, frequenc
             
             print(f"Frequency offset {freq}: Total errors = {error_count}.")
             
-            # Stop early if maximum errors reached
             if error_count >= max_errors:
-                print(f"Maximum errors reached at frequency {freq}. Moving to the next frequency.")
+                break
     
-    # Reset GPU frequency offset to default
     print("\nResetting GPU frequency offset to default...")
     set_gpu_frequency(0)
-    
     print(f"Test completed. Results saved to {output_file}")
 
 
-# Run the GPU stress test
-gpu_stress_test(matrix_size=1024, max_errors=100, test_duration=180, frequency_offsets=list(range(400, 354, -5)))
-
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="GPU Stress Test with SM Usage")
+    parser.add_argument("-ms", "--matrix_size", type=int, default=256, help="Size of the square matrix.")
+    parser.add_argument("-me", "--max_errors", type=int, default=100, help="Maximum number of errors before stopping.")
+    parser.add_argument("-td", "--test_duration", type=int, default=180, help="Duration of the test in seconds.")
+    parser.add_argument("-fs", "--freq_start", type=int, default=100, help="Starting frequency offset.")
+    parser.add_argument("-fe", "--freq_end", type=int, default=0, help="Ending frequency offset.")
+    parser.add_argument("-fstride", "--freq_stride", type=int, default=5, help="Frequency offset stride.")
+    parser.add_argument("-of", "--output_file", type=str, default="gpu_stress_test.csv", help="Output CSV file for results.")
+    
+    args = parser.parse_args()
+    print(args)
+    gpu_stress_test(
+        matrix_size=args.matrix_size,
+        max_errors=args.max_errors,
+        test_duration=args.test_duration,
+        freq_start=args.freq_start,
+        freq_end=args.freq_end,
+        freq_stride=args.freq_stride,
+        output_file=args.output_file,
+    )
