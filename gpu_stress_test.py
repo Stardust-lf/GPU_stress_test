@@ -138,4 +138,4 @@ def gpu_stress_test(matrix_size=1024, max_errors=20, test_duration=180, frequenc
     set_gpu_frequency(0)
 
     print(f"Test completed. Results saved to {output_file}")
-gpu_stress_test(matrix_size=1024 * 2, max_errors=1000, test_duration=1800, frequency_offsets=list(range(300, -1, -15)), output_file="./data/result.csv")
+gpu_stress_test(matrix_size=1024 * 2, max_errors=1000, test_duration=1800, frequency_offsets=list(range(335, 300, -15)), output_file="./data/result_3.csv")
