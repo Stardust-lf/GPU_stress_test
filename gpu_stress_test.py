@@ -55,6 +55,7 @@ def gpu_stress_test(matrix_size=1024, max_errors=20, test_duration=180, frequenc
             # Compile and get the matrix multiplication kernel
             mod = SourceModule(
                 """
+
                 __global__ void matrix_multiply(unsigned *a, unsigned *b, unsigned *c, int matrix_size)
                 {
                     int row = blockIdx.y * blockDim.y + threadIdx.y;
@@ -119,6 +120,7 @@ def gpu_stress_test(matrix_size=1024, max_errors=20, test_duration=180, frequenc
                         error_iterations_since_last_error
                     ])
 
+                    print("error!")
                     # Update error tracking variables
                     error_count += 1
                     last_write_time = current_time
@@ -138,4 +140,4 @@ def gpu_stress_test(matrix_size=1024, max_errors=20, test_duration=180, frequenc
     set_gpu_frequency(0)
 
     print(f"Test completed. Results saved to {output_file}")
-gpu_stress_test(matrix_size=1024 * 2, max_errors=1000, test_duration=1800, frequency_offsets=list(range(335, 300, -15)), output_file="./data/result_3.csv")
+gpu_stress_test(matrix_size=512, max_errors=30, test_duration=900, frequency_offsets=list(range(285, 160, -15)), output_file="./data/512.csv")
